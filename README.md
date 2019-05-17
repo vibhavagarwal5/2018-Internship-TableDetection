@@ -356,7 +356,7 @@ To log the Crawler output you should create a log file, and allow a non-sudo use
 
 ```
 $ mkdir /home/yann/bar/log && touch /home/yann/bar/log/wget.txt
-$ chmod 777 /home/yann/bar/wget.txt
+$ chmod 777 /home/yann/bar/log/wget.txt
 ```
 
 The temporarily stored crawled data will be located in the /data directory. You should create and allow access to it.
