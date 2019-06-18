@@ -20,12 +20,15 @@ import tabula
 import PyPDF2
 import shutil
 import requests
+from statistics import median, mean, variance, mode
+import logging
+from celery.utils.log import get_task_logger
 
 # ----------------------------- CONSTANTS -----------------------------------------------------------------------------
 
 
 # --- TODO has to be changed when deploying ---
-VIRTUALENV_PATH = '/home/yann/bar/virtualenv/bin/celery'
+VIRTUALENV_PATH = '/home/bar/virtualenv/bin/celery'
 
 PDF_TO_PROCESS = 100
 MAX_CRAWLING_DURATION = 60 * 15         # in seconds
@@ -43,6 +46,7 @@ CRAWL_REPETITION_WARNING_TIME = 7                  # in days
 MAX_CRAWL_DEPTH = 5
 DEFAULT_CRAWL_URL = 'https://www.bit.admin.ch'
 WGET_DATA_PATH = 'data'
+WGET_DATA_CSV_PATH = 'data_csv'
 
 
 BAR_OUT_LOG_PATH = 'log/bar.out.log'
@@ -53,12 +57,12 @@ FLOWER_LOG_PATH = 'log/flower.log'
 WGET_LOG_PATH = 'log/wget.txt'
 
 switcher = {
-        'bar.out.log': BAR_OUT_LOG_PATH,
-        'bar.err.log': BAR_ERR_LOG_PATH,
-        'celery.log': CELERY_LOG_PATH,
-        'redis.log': REDIS_LOG_PATH,
-        'flower.log': FLOWER_LOG_PATH,
-        'wget.log': WGET_LOG_PATH,
+    'bar.out.log': BAR_OUT_LOG_PATH,
+    'bar.err.log': BAR_ERR_LOG_PATH,
+    'celery.log': CELERY_LOG_PATH,
+    'redis.log': REDIS_LOG_PATH,
+    'flower.log': FLOWER_LOG_PATH,
+    'wget.log': WGET_LOG_PATH,
 }
 
 
@@ -70,7 +74,7 @@ switcher = {
 async_mode = None
 
 app = Flask(__name__)
-#app.debug = True
+app.debug = True
 app.secret_key = 'Aj"$7PE#>3AC6W]`STXYLz*[G\gQWA'
 
 # Celery configuration
@@ -85,12 +89,13 @@ lock = Lock()
 
 # Initialize Celery
 celery = Celery(app.name, broker=app.config['CELERY_BROKER_URL'])
+celery.config_from_object(__name__)
 celery.conf.update(app.config)
 
 # Config MySQL
 app.config['MYSQL_HOST'] = 'localhost'
 app.config['MYSQL_USER'] = 'root'
-app.config['MYSQL_PASSWORD'] = 'mountain'
+app.config['MYSQL_PASSWORD'] = 'password'
 app.config['MYSQL_DB'] = 'bar'
 app.config['MYSQL_CURSORCLASS'] = 'DictCursor'
 
@@ -101,19 +106,26 @@ mysql = MySQL(app)
 # ----------------------------- CELERY TASKS --------------------------------------------------------------------------
 
 # Background task in charge of crawling
-@celery.task(bind=True)                 # time_limit=MAX_CRAWLING_DURATION other possibility
+# time_limit=MAX_CRAWLING_DURATION other possibility
+
+# logging.basicConfig(filename='./log/foo.log',level=logging.DEBUG)
+logger = get_task_logger(__name__)
+
+@celery.task(bind=True)
 def crawling_task(self, url='', post_url='', domain='',
                   max_crawl_duration=MAX_CRAWLING_DURATION, max_crawl_size=MAX_CRAWL_SIZE,
                   max_crawl_depth=MAX_CRAWL_DEPTH):
 
     # STEP 1: Start the wget subprocess
-    command = shlex.split("timeout %d wget -r -l %d -A pdf %s" % (max_crawl_duration, max_crawl_depth, url,))
+    command = shlex.split("timeout %d wget -r -l %d -A pdf %s" %
+                          (max_crawl_duration, max_crawl_depth, url,))
     # Note: Consider using --wait flag, takes longer to download but less aggressive crawled server
     # https://www.gnu.org/software/wget/manual/wget.html#Recursive-Download
 
     # Note: Using timeout is not necessary, but serves as safety, as wget should be used with caution.
 
-    process = subprocess.Popen(command, cwd=WGET_DATA_PATH, stderr=subprocess.PIPE)
+    process = subprocess.Popen(
+        command, cwd=WGET_DATA_PATH, stderr=subprocess.PIPE)
 
     # Set the pid in the state in order to be able to cancel subprocess anytime
     # Note: one could also cancel the celery task which then should kill its subprocess, but again I prefer option one
@@ -129,12 +141,14 @@ def crawling_task(self, url='', post_url='', domain='',
                 # Noticed by Jean-Luc.
                 decoded_line = next_line.decode(encoding='utf-8')
 
-                post(post_url, json={'event': 'crawl_update', 'data': decoded_line})
+                post(post_url, json={
+                     'event': 'crawl_update', 'data': decoded_line})
                 logfile.write(decoded_line)
 
             except UnicodeDecodeError as e:
                 # Catch Decoding error.
-                print("UnicodeDecodeError: " + str(e) + " The bytes trying to get decoded were: " + next_line.hex())
+                print("UnicodeDecodeError: " + str(e) +
+                      " The bytes trying to get decoded were: " + next_line.hex())
 
             if process.poll() is not None:
                 # Subprocess is finished
@@ -156,7 +170,8 @@ def crawling_task(self, url='', post_url='', domain='',
     exitCode = process.returncode
 
     # STEP 5: redirect user to crawling end options.
-    post(post_url, json={'event': 'redirect', 'data': {'url': '/crawling/autoend'}})
+    post(post_url, json={'event': 'redirect',
+                         'data': {'url': '/crawling/autoend'}})
 
     # TODO consider releasing lock here
 
@@ -165,10 +180,15 @@ def crawling_task(self, url='', post_url='', domain='',
 
 # Background task in charge of performing table detection on a single pdf
 @celery.task(bind=True)
-def tabula_task(self, file_path='', post_url=''):
-
+def tabula_task(self, file_path='', post_url='', domain=''):
+    
     # STEP 0: check if file is already in db
     url = file_path[(len(WGET_DATA_PATH) + 1):]
+    logger.info('Inside tabula_task')
+
+    csv_dir = WGET_DATA_CSV_PATH + '/' + domain
+    if not os.path.exists(csv_dir):
+            os.makedirs(csv_dir)
 
     try:
         with app.app_context():
@@ -176,7 +196,8 @@ def tabula_task(self, file_path='', post_url=''):
             cur = mysql.connection.cursor()
 
             # Get Crawls
-            result = cur.execute("""SELECT fid, stats FROM Files WHERE url=%s""", (url,))
+            result = cur.execute(
+                """SELECT fid, stats FROM Files WHERE url=%s""", (url,))
             file = cur.fetchone()
 
             # If there was a result then return stats directly
@@ -189,7 +210,7 @@ def tabula_task(self, file_path='', post_url=''):
                 post(post_url, json={'event': 'tabula_success', 'data': {'data': 'Processing time saved, document was '
                                                                                  'already processed '
                                                                                  'at an earlier time: ',
-                                     'pages': stats['n_pages'], 'tables': stats['n_tables']}})
+                                                                         'pages': stats['n_pages'], 'tables': stats['n_tables']}})
 
                 return file['fid']
 
@@ -217,12 +238,50 @@ def tabula_task(self, file_path='', post_url=''):
         return -1
 
     # STEP 3: run TABULA to extract all tables into one pandas data frame
+    # logger.info('file_path: ' + type(file_path))
     try:
-        df_array = tabula.read_pdf(file_path, pages="all", multiple_tables=True)
+        df_array = tabula.read_pdf(
+            file_path, pages="all", multiple_tables=True)
+
     except Exception as e:
         # Communicate failure to client
         post(post_url, json={'event': 'processing_failure', 'data': {'pdf_name': file_path,
                                                                      'text': 'Tabula error on file : ',
+                                                                     'trace': str(e)}})
+        return -1
+
+    try:
+        logger.info('Before df: ' + str(len(df_array)))
+
+        # Filtering heuristics
+        # Removing dataframes with no of col=1
+        df2remove_i = [i for i, df in enumerate(df_array) if df.shape[1] > 1]
+        df_array = [df_array[i] for i in df2remove_i]
+
+        def check(x):
+            if type(x) == str:
+                return len(x.split())
+            else:
+                return 0
+
+        # Removing dataframes where the mean no of words in a dataframe > 2.5 (too wordy dataframe)
+        smalldf2keep_i = []
+        for i, df in enumerate(df_array):
+            if df.shape[1] == 2:
+                mean_len = [mean(row.apply(check)) for i, row in df.iterrows()]
+                if mean(mean_len) < 2.5:
+                    smalldf2keep_i.append(i)
+            else:
+                smalldf2keep_i.append(i)
+
+        df_array = [df_array[i] for i in smalldf2keep_i]
+        logger.info('After df: ' + str(len(df_array)))
+        for i, df in enumerate(df_array):
+            df.to_csv(csv_dir + '/' + file_path.split('/')[-1] + str(i) + '.csv')
+
+    except Exception as e:
+        post(post_url, json={'event': 'processing_failure', 'data': {'pdf_name': file_path,
+                                                                     'text': 'Dataframe processing error : ',
                                                                      'trace': str(e)}})
         return -1
 
@@ -290,8 +349,10 @@ def pdf_stats(self, tabula_list, domain='', url='', crawl_total_time=0, post_url
         # STEP 1: Call Helper function to create Json string
         # https://stackoverflow.com/questions/35959580/non-ascii-file-name-issue-with-os-walk works
         # https://stackoverflow.com/questions/2004137/unicodeencodeerror-on-joining-file-name doesn't work
-        hierarchy_dict = path_dict(path)  # adding ur does not work as expected either
-        hierarchy_json = json.dumps(hierarchy_dict, sort_keys=True, indent=4)  #encoding='cp1252' not needed in python3
+        # adding ur does not work as expected either
+        hierarchy_dict = path_dict(path)
+        # encoding='cp1252' not needed in python3
+        hierarchy_json = json.dumps(hierarchy_dict, sort_keys=True, indent=4)
 
         # STEP 2: Call helper function to count number of pdf files
         n_files = path_number_of_files(path)
@@ -343,7 +404,8 @@ def pdf_stats(self, tabula_list, domain='', url='', crawl_total_time=0, post_url
         cur.close()
 
         # Send success message asynchronously to clients
-        post(post_url, json={'event': 'redirect', 'data': {'url': '/processing'}})
+        post(post_url, json={'event': 'redirect',
+                             'data': {'url': '/processing'}})
 
         return 'success'
 
@@ -374,11 +436,14 @@ def stream_template(template_name, **context):
 
 # Crawl from to check user input
 class CrawlForm(Form):
-    url = StringField('URL', [validators.Length(min=4, max=300)], default=DEFAULT_CRAWL_URL)
-    depth = IntegerField('Max Crawl Depth', [validators.NumberRange(min=1, max=10)], default=MAX_CRAWL_DEPTH)
+    url = StringField('URL', [validators.Length(
+        min=4, max=300)], default=DEFAULT_CRAWL_URL)
+    depth = IntegerField('Max Crawl Depth', [validators.NumberRange(
+        min=1, max=10)], default=MAX_CRAWL_DEPTH)
     time = IntegerField('Max Crawl Duration [Minutes]', [validators.NumberRange(min=1, max=1000)],
                         default=int(MAX_CRAWLING_DURATION / 60))
-    size = IntegerField('Max Crawl Size [MBytes]', [validators.NumberRange(min=10, max=1000)], default=MB_CRAWL_SIZE)
+    size = IntegerField('Max Crawl Size [MBytes]', [
+                        validators.NumberRange(min=10, max=1000)], default=MB_CRAWL_SIZE)
     pdf = IntegerField('Max Number of PDF to be processed', [validators.NumberRange(min=0, max=10000)],
                        default=PDF_TO_PROCESS)
 
@@ -405,7 +470,8 @@ def index():
         # Check if valid URL with function in helper module
         status_code = url_status(url)
         if status_code == -1:
-            flash('Impossible to establish contact to given URL, check for typos and format.', 'danger')
+            flash(
+                'Impossible to establish contact to given URL, check for typos and format.', 'danger')
             return render_template('home.html', most_recent_url="none", form=form)
         elif status_code is not requests.codes.ok:
             flash('Contact to given url was established, but received back the following status code: '
@@ -495,13 +561,16 @@ def end_crawling():
         return redirect(url_for('index'))
 
     # STEP 1: Kill only subprocess, and the celery process will then recognize it and terminate too
-    celery_id = session.get('crawling_id', 0)                       # get saved celery task id
+    # get saved celery task id
+    celery_id = session.get('crawling_id', 0)
     try:
         # This is a hack to kill the spawned subprocess and not only the celery task
         # I read that in some cases the subprocess doesn't get terminated when the Celery task is revoked,
         # though I never observed this behavior.
-        pid = crawling_task.AsyncResult(celery_id).info.get('pid')      # get saved subprocess id
-        os.kill(pid, signal.SIGTERM)                                    # kill subprocess
+        pid = crawling_task.AsyncResult(celery_id).info.get(
+            'pid')      # get saved subprocess id
+        # kill subprocess
+        os.kill(pid, signal.SIGTERM)
     except AttributeError:
         flash("Either the task was not scheduled yet, is already over, or was interrupted from someone else"
               " and thus interruption is not possible", 'danger')
@@ -512,7 +581,8 @@ def end_crawling():
     session['crawl_total_time'] = time.time() - crawl_start_time
 
     # STEP 3: Successful interruption
-    session['crawling_id'] = 0                                      # remove crawling id
+    # remove crawling id
+    session['crawling_id'] = 0
     flash('You successfully manually interrupted the crawler.', 'success')
 
     # STEP 4: Release Lock
@@ -590,7 +660,8 @@ def table_detection():
                         count += 1
 
             # STEP 2: Prepare a celery task for every pdf and then a callback to store result in db
-            header = (tabula_task.s(f, post_url) for f in file_array)
+            header = (tabula_task.s(f, post_url, domain) for f in file_array)
+            logger.info(header)
             callback = pdf_stats.s(domain=domain, url=url, crawl_total_time=crawl_total_time, post_url=post_url,
                                    processing_start_time=processing_start_time)
 
@@ -606,7 +677,8 @@ def table_detection():
         except Exception as e:
             # If something goes wrong make sure all tasks get revoked and lock released
             terminate()
-            flash("Something went wrong: " + str(e) + " --- All tasks were revoked and the lock released")
+            flash("Something went wrong: " + str(e) +
+                  " --- All tasks were revoked and the lock released")
 
 
 # End of PDF processing (FIXME name not very fitting anymore)
@@ -628,7 +700,8 @@ def statistics():
     cur = mysql.connection.cursor()
 
     # Get user by username
-    cur.execute("""SELECT cid FROM Crawls WHERE crawl_date = (SELECT max(crawl_date) FROM Crawls)""")
+    cur.execute(
+        """SELECT cid FROM Crawls WHERE crawl_date = (SELECT max(crawl_date) FROM Crawls)""")
 
     result = cur.fetchone()
 
@@ -656,7 +729,7 @@ def cid_statistics(cid):
 
     # Get stats by getting all individual files
     cur.execute("""SELECT url, stats FROM Files f JOIN Crawlfiles cf ON f.fid = cf.fid WHERE cid = %s""",
-                         (cid,))
+                (cid,))
     stats_db = cur.fetchall()
     stats = {}
     for stat in stats_db:
@@ -670,16 +743,22 @@ def cid_statistics(cid):
 
     stats_items = stats.items()
     n_tables = sum([subdict['n_tables'] for filename, subdict in stats_items])
-    n_rows = sum([subdict['n_table_rows'] for filename, subdict in stats_items])
+    n_rows = sum([subdict['n_table_rows']
+                  for filename, subdict in stats_items])
     n_pages = sum([subdict['n_pages'] for filename, subdict in stats_items])
 
-    medium_tables = sum([subdict['table_sizes']['medium'] for filename, subdict in stats_items])
-    small_tables = sum([subdict['table_sizes']['small'] for filename, subdict in stats_items])
-    large_tables = sum([subdict['table_sizes']['large'] for filename, subdict in stats_items])
+    medium_tables = sum([subdict['table_sizes']['medium']
+                         for filename, subdict in stats_items])
+    small_tables = sum([subdict['table_sizes']['small']
+                        for filename, subdict in stats_items])
+    large_tables = sum([subdict['table_sizes']['large']
+                        for filename, subdict in stats_items])
 
     # Find some stats about creation dates
-    creation_dates_pdf = [subdict['creation_date'] for filename, subdict in stats_items]
-    creation_dates = list(map(lambda s: pdf_date_format_to_datetime(s), creation_dates_pdf))
+    creation_dates_pdf = [subdict['creation_date']
+                          for filename, subdict in stats_items]
+    creation_dates = list(
+        map(lambda s: pdf_date_format_to_datetime(s), creation_dates_pdf))
     disk_size = round(crawl['disk_size'] / (1024*1024), 1)
 
     if len(creation_dates) > 0:
@@ -690,12 +769,16 @@ def cid_statistics(cid):
         most_recent_pdf = "None"
 
     return render_template('statistics.html', cid=cid, n_files=crawl['pdf_crawled'], n_success=crawl['pdf_processed'],
-                           n_tables=n_tables, n_rows=n_rows, n_errors=crawl['process_errors'], domain=crawl['domain'],
+                           n_tables=n_tables, n_rows=n_rows, n_errors=crawl[
+                               'process_errors'], domain=crawl['domain'],
                            small_tables=small_tables, medium_tables=medium_tables,
-                           large_tables=large_tables, stats=json.dumps(stats, sort_keys=True, indent=4),
+                           large_tables=large_tables, stats=json.dumps(
+                               stats, sort_keys=True, indent=4),
                            hierarchy=json_hierarchy, end_time=crawl['crawl_date'],
-                           crawl_total_time=round(crawl['crawl_total_time'] / 60.0, 1),
-                           proc_total_time=round(crawl['proc_total_time'] / 60.0, 1),
+                           crawl_total_time=round(
+                               crawl['crawl_total_time'] / 60.0, 1),
+                           proc_total_time=round(
+                               crawl['proc_total_time'] / 60.0, 1),
                            oldest_pdf=oldest_pdf, most_recent_pdf=most_recent_pdf, disk_size=disk_size,
                            n_pages=n_pages)
 
@@ -752,14 +835,16 @@ def login():
         cur = mysql.connection.cursor()
 
         # Get user by username
-        result = cur.execute("""SELECT * FROM Users WHERE username = %s""", [username])
+        result = cur.execute(
+            """SELECT * FROM Users WHERE username = %s""", [username])
 
         # Note: apparently this is safe from SQL injections see
         # https://stackoverflow.com/questions/7929364/python-best-practice-and-securest-to-connect-to-mysql-and-execute-queries/7929438#7929438
 
         if result > 0:
             # Get stored hash
-            data = cur.fetchone()                                       # FIXME username should be made primary key
+            # FIXME username should be made primary key
+            data = cur.fetchone()
             password = data['password']
 
             # Compare passwords
@@ -810,7 +895,8 @@ def delete_crawl():
             return redirect(url_for('dashboard'))
 
         except Exception as e:
-            flash('An error occurred while trying to delete the crawl: ' + str(e), 'danger')
+            flash(
+                'An error occurred while trying to delete the crawl: ' + str(e), 'danger')
             redirect(url_for('dashboard'))
 
 
@@ -831,7 +917,8 @@ def dashboard():
     cur = mysql.connection.cursor()
 
     # Get Crawls
-    result = cur.execute("""SELECT cid, crawl_date, pdf_crawled, pdf_processed, domain, url FROM Crawls""")
+    result = cur.execute(
+        """SELECT cid, crawl_date, pdf_crawled, pdf_processed, domain, url FROM Crawls""")
 
     crawls = cur.fetchall()
 
@@ -855,7 +942,8 @@ def advanced():
 def terminate():
 
     # Purge all tasks from task queue
-    command = shlex.split(VIRTUALENV_PATH + " -f -A bar.celery purge") #FIXME datapath variable
+    # FIXME datapath variable
+    command = shlex.split(VIRTUALENV_PATH + " -f -A bar.celery purge")
     subprocess.Popen(command)
 
     # Kill all Celery tasks that have an ETA or are scheduled for later processing
@@ -865,21 +953,24 @@ def terminate():
     # FIXME don't replicate same code 3 times
     for workers in scheduled_tasks:
         for j in range(0, len(scheduled_tasks[workers])):
-            celery.control.revoke(scheduled_tasks[workers][j]['id'], terminate=True)
+            celery.control.revoke(
+                scheduled_tasks[workers][j]['id'], terminate=True)
 
     # Kill all Celery tasks that are currently active.
     active_tasks = i.active()
 
     for workers in active_tasks:
         for j in range(0, len(active_tasks[workers])):
-            celery.control.revoke(active_tasks[workers][j]['id'], terminate=True)
+            celery.control.revoke(
+                active_tasks[workers][j]['id'], terminate=True)
 
     # Kill all Celery tasks that have been claimed by workers
     reserved_tasks = i.reserved()
 
     for workers in reserved_tasks:
         for j in range(0, len(reserved_tasks[workers])):
-            celery.control.revoke(reserved_tasks[workers][j]['id'], terminate=True)
+            celery.control.revoke(
+                reserved_tasks[workers][j]['id'], terminate=True)
 
     # Release Lock if locked
     try:
@@ -946,7 +1037,8 @@ def delete_data():
         try:
             if os.path.isfile(file_path):
                 os.unlink(file_path)
-            elif os.path.isdir(file_path): shutil.rmtree(file_path)
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path)
         except Exception as e:
             print(e)
 
@@ -963,7 +1055,8 @@ def hierarchy_download(cid):
     cur = mysql.connection.cursor()
 
     # Get Crawls
-    result = cur.execute("""SELECT hierarchy FROM Crawls WHERE cid = %s""", (cid,))
+    result = cur.execute(
+        """SELECT hierarchy FROM Crawls WHERE cid = %s""", (cid,))
     if not result > 0:
         return
 
@@ -992,7 +1085,7 @@ def log_delete(lid):
     if lid in switcher:
         open(switcher.get(lid), 'w').close()
         flash('Log was successfully emptied', 'success')
-        return  redirect(url_for('advanced'))
+        return redirect(url_for('advanced'))
     else:
         flash('An error occurred while trying to delete log', 'error')
         return redirect(url_for('advanced'))

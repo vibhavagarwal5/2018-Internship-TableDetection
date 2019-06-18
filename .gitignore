@@ -1,6 +1,9 @@
 data/*
+data_csv/*
 __pycache__/
 .idea/
+.vscode/
+dump.rdb
 node_modules/
 venv/
 pdftables/
