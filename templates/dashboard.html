@@ -48,6 +48,7 @@
                     <td>{{crawl.pdf_crawled}}</td>
                     <td>{{crawl.pdf_processed}}</td>
                     <td><a href="{{url_for('cid_statistics', cid=crawl.cid)}}" class="btn btn-primary">View Stats</a></td>
+                    <td><a href="{{url_for('cid_entity_detection', cid=crawl.cid)}}" class="btn btn-primary">Entity Detection</a></td>
                     <td>
                         <!-- Button trigger modal -->
                         <button class="btn btn-danger" data-toggle="modal" data-target="#modal{{crawl.cid}}">

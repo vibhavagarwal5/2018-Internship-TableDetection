@@ -1,7 +1,4 @@
-import subprocess
-import shlex
-import os
-import signal
+import subprocess, shlex, os, signal
 from helper import path_dict, path_number_of_files, pdf_stats, pdf_date_format_to_datetime, dir_size, url_status
 import json
 from functools import wraps
@@ -23,14 +20,19 @@ import requests
 from statistics import median, mean, variance, mode
 import logging
 from celery.utils.log import get_task_logger
+import pandas as pd
+import numpy as np
+import webTables.loadmodel as LM
+import webTables.Multiprocessing as MP
+import pickle
 
 # ----------------------------- CONSTANTS -----------------------------------------------------------------------------
 
 
 # --- TODO has to be changed when deploying ---
-VIRTUALENV_PATH = '/home/bar/virtualenv/bin/celery'
+VIRTUALENV_PATH = '/home/vibhav/bar/virtualenv/bin/celery'
 
-PDF_TO_PROCESS = 100
+# PDF_TO_PROCESS = 100
 MAX_CRAWLING_DURATION = 60 * 15         # in seconds
 WAIT_AFTER_CRAWLING = 1000              # in milliseconds
 SMALL_TABLE_LIMIT = 10                  # defines what is considered a small table
@@ -65,6 +67,9 @@ switcher = {
     'wget.log': WGET_LOG_PATH,
 }
 
+model = None
+search = None
+Levenshtein_Limaye = None
 
 # ----------------------------- APP CONFIG ----------------------------------------------------------------------------
 
@@ -103,13 +108,16 @@ app.config['MYSQL_CURSORCLASS'] = 'DictCursor'
 mysql = MySQL(app)
 
 
+# ----------------------------- LOGGING  --------------------------------------------------------------------------
+
+logging.basicConfig(filename='/home/vibhav/bar/log/foo.log',level=logging.DEBUG)
+logger = get_task_logger(__name__)
+
+
 # ----------------------------- CELERY TASKS --------------------------------------------------------------------------
 
 # Background task in charge of crawling
 # time_limit=MAX_CRAWLING_DURATION other possibility
-
-# logging.basicConfig(filename='./log/foo.log',level=logging.DEBUG)
-logger = get_task_logger(__name__)
 
 @celery.task(bind=True)
 def crawling_task(self, url='', post_url='', domain='',
@@ -186,9 +194,6 @@ def tabula_task(self, file_path='', post_url='', domain=''):
     url = file_path[(len(WGET_DATA_PATH) + 1):]
     logger.info('Inside tabula_task')
 
-    csv_dir = WGET_DATA_CSV_PATH + '/' + domain
-    if not os.path.exists(csv_dir):
-            os.makedirs(csv_dir)
 
     try:
         with app.app_context():
@@ -251,33 +256,60 @@ def tabula_task(self, file_path='', post_url='', domain=''):
         return -1
 
     try:
+        logger.info('FILEPATH: ' + file_path)
         logger.info('Before df: ' + str(len(df_array)))
-
+        
+        # STEP 4: Filtering the dataframes
         # Filtering heuristics
         # Removing dataframes with no of col=1
         df2remove_i = [i for i, df in enumerate(df_array) if df.shape[1] > 1]
         df_array = [df_array[i] for i in df2remove_i]
 
-        def check(x):
+        def split_row_words(x):
             if type(x) == str:
                 return len(x.split())
             else:
                 return 0
+        
+        def check(df):
+            l = []
+            for i,row in df.iterrows():
+                l.append(np.array([j for j in row.apply(split_row_words)]))
+            l = np.array(l).flatten()
+            count = 0
+            for a in l:
+                if a > 6:
+                    count = count + 1
+            return i/len(l) < 0.2
 
         # Removing dataframes where the mean no of words in a dataframe > 2.5 (too wordy dataframe)
         smalldf2keep_i = []
         for i, df in enumerate(df_array):
-            if df.shape[1] == 2:
-                mean_len = [mean(row.apply(check)) for i, row in df.iterrows()]
-                if mean(mean_len) < 2.5:
-                    smalldf2keep_i.append(i)
-            else:
+            mean_len = [mean(row.apply(split_row_words)) for i, row in df.iterrows()]
+            # logger.info('CHECK: ' + str(mean(mean_len) < 4) + " : " + str(check(df)))
+            if mean(mean_len) < 4 or check(df):
                 smalldf2keep_i.append(i)
 
         df_array = [df_array[i] for i in smalldf2keep_i]
+
         logger.info('After df: ' + str(len(df_array)))
+        
         for i, df in enumerate(df_array):
-            df.to_csv(csv_dir + '/' + file_path.split('/')[-1] + str(i) + '.csv')
+            df.to_csv(WGET_DATA_CSV_PATH + '/' + domain + '/' + file_path.split('/')[-1] + str(i) + '.csv', header=False, index=False)
+
+        # STEP 5: count number of rows in each data frame
+        for df in df_array:
+            rows = df.shape[0]
+            n_table_rows += rows
+            n_tables += 1
+
+            # Add table stats
+            if rows <= SMALL_TABLE_LIMIT:
+                table_sizes['small'] += 1
+            elif rows <= MEDIUM_TABLE_LIMIT:
+                table_sizes['medium'] += 1
+            else:
+                table_sizes['large'] += 1
 
     except Exception as e:
         post(post_url, json={'event': 'processing_failure', 'data': {'pdf_name': file_path,
@@ -285,21 +317,7 @@ def tabula_task(self, file_path='', post_url='', domain=''):
                                                                      'trace': str(e)}})
         return -1
 
-    # STEP 4: count number of rows in each data frame
-    for df in df_array:
-        rows = df.shape[0]
-        n_table_rows += rows
-        n_tables += 1
-
-        # Add table stats
-        if rows <= SMALL_TABLE_LIMIT:
-            table_sizes['small'] += 1
-        elif rows <= MEDIUM_TABLE_LIMIT:
-            table_sizes['medium'] += 1
-        else:
-            table_sizes['large'] += 1
-
-    # STEP 5: save stats as intermediary results in db
+    # STEP 6: save stats as intermediary results in db
     try:
         creation_date = pdf_file.getDocumentInfo()['/CreationDate']
         stats = {'n_pages': n_pages, 'n_tables': n_tables,
@@ -330,7 +348,7 @@ def tabula_task(self, file_path='', post_url='', domain=''):
                                                                      'trace': str(e)}})
         return -1
 
-    # STEP 6: Send success message to client
+    # STEP 7: Send success message to client
     post(post_url, json={'event': 'tabula_success', 'data': {'data': 'Tabula PDF success: ',
                                                              'pages': n_pages, 'tables': n_tables}})
 
@@ -444,8 +462,8 @@ class CrawlForm(Form):
                         default=int(MAX_CRAWLING_DURATION / 60))
     size = IntegerField('Max Crawl Size [MBytes]', [
                         validators.NumberRange(min=10, max=1000)], default=MB_CRAWL_SIZE)
-    pdf = IntegerField('Max Number of PDF to be processed', [validators.NumberRange(min=0, max=10000)],
-                       default=PDF_TO_PROCESS)
+    # pdf = IntegerField('Max Number of PDF to be processed', [validators.NumberRange(min=0, max=10000)],
+    #                    default=PDF_TO_PROCESS)
 
 
 # Index
@@ -456,7 +474,8 @@ def index():
     if request.method == 'POST' and form.validate():
 
         # Change global variables depending on input
-        global MAX_CRAWLING_DURATION, MAX_CRAWL_DEPTH, MAX_CRAWL_SIZE, MB_CRAWL_SIZE, PDF_TO_PROCESS
+        global MAX_CRAWLING_DURATION, MAX_CRAWL_DEPTH, MAX_CRAWL_SIZE, MB_CRAWL_SIZE
+        # , PDF_TO_PROCESS
 
         # Get Form Fields and update variables
         url = form.url.data
@@ -465,7 +484,7 @@ def index():
         MB_CRAWL_SIZE = form.size.data
         MAX_CRAWL_SIZE = 1024 * 1024 * MB_CRAWL_SIZE
         MAX_CRAWLING_DURATION = form.time.data * 60
-        PDF_TO_PROCESS = form.pdf.data
+        # PDF_TO_PROCESS = form.pdf.data
 
         # Check if valid URL with function in helper module
         status_code = url_status(url)
@@ -647,6 +666,12 @@ def table_detection():
             post_url = url_for('event', _external=True)
 
             path = WGET_DATA_PATH + '/' + domain
+            csv_dir = WGET_DATA_CSV_PATH + '/' + domain
+            
+            if not os.path.exists(csv_dir):
+                oldmask = os.umask(000)
+                os.makedirs(csv_dir,0o777)
+                os.umask(oldmask)
 
             count = 0
             file_array = []
@@ -654,16 +679,15 @@ def table_detection():
             # STEP 1: Find PDF we want to process
             for dir_, _, files in os.walk(path):
                 for fileName in files:
-                    if ".pdf" in fileName and count < PDF_TO_PROCESS:
+                    if ".pdf" in fileName:
+                    # if ".pdf" in fileName and count < PDF_TO_PROCESS:
                         rel_file = os.path.join(dir_, fileName)
                         file_array.append(rel_file)
                         count += 1
 
             # STEP 2: Prepare a celery task for every pdf and then a callback to store result in db
             header = (tabula_task.s(f, post_url, domain) for f in file_array)
-            logger.info(header)
-            callback = pdf_stats.s(domain=domain, url=url, crawl_total_time=crawl_total_time, post_url=post_url,
-                                   processing_start_time=processing_start_time)
+            callback = pdf_stats.s(domain=domain, url=url, crawl_total_time=crawl_total_time, post_url=post_url, processing_start_time=processing_start_time)
 
             # STEP 3: Run the celery Chord
             chord(header)(callback)
@@ -1102,6 +1126,35 @@ def event():
     return 'error', 404
 
 
+@app.route('/entity_detection/<int:cid>')
+def cid_entity_detection(cid):
+
+    # STEP 1: retrieve all saved stats from DB
+    # Create cursor
+    cur = mysql.connection.cursor()
+
+    cur.execute("""SELECT * FROM Crawls WHERE cid = %s""", (cid,))
+    crawl = cur.fetchone()
+
+    # Close connection
+    cur.close()
+    # logging.debug(crawl)
+
+    # info_data = {
+    #     'domain': crawl['domain'],
+    #     'model': load_model.AsyncResult(app=celery, task_id=model.id).get(),
+    #     'search': load_search.AsyncResult(app=celery, task_id=search.id).get(),
+    #     'Levenshtein_Limaye': load_levenshtein.AsyncResult(app=celery, task_id=Levenshtein_Limaye.id).get()
+    # }
+
+    MP.run_detection(
+        crawl['domain'],
+        load_model.AsyncResult(app=celery, task_id=model.id).get(),
+        load_search.AsyncResult(app=celery, task_id=search.id).get(),
+        load_levenshtein.AsyncResult(app=celery, task_id=Levenshtein_Limaye.id).get())
+
+    return redirect(url_for('index'))
+
 # ----------------------------- ASYNCHRONOUS COMMUNICATION ------------------------------------------------------------
 # Note: these are not crucial at the moment,
 # though it would be nice to direct messages to clients instead of broadcasting.
@@ -1115,6 +1168,52 @@ def test_connect():
 @socketio.on('disconnect')
 def test_disconnect():
     print('Client disconnected', request.sid)
+
+
+
+# ----------------------------- LOADING PICKLES -------------------------------------------------------------------
+
+@celery.task(bind=True)
+def load_model(self):
+    # time.sleep(10)
+    # return "ola amigo m"
+    return LM.Model.load(models_directory="/home/yasamin/Codes/WebTableAnnotation/data/models/Model_Creation",filename="3-wikidata-20190229-truthy-BETA-cbow-size=100-window=1-min_count=1")
+
+@celery.task(bind=True)
+def load_search(self):
+    # time.sleep(20)
+    # return "ola amigo s"
+    return pickle.load(open("/home/yasamin/Codes/WebTableAnnotation/data/surface/Surface_Lower_NoPunc.pickle", "rb"))
+
+@celery.task(bind=True)
+def load_levenshtein(self):
+    # time.sleep(30)
+    # return "ola amigo l"
+    return pickle.load(open("/home/yasamin/Codes/WebTableAnnotation/data/LimayeLevenshtein_allcols.pickle", "rb"))
+
+@app.before_first_request
+def _run_on_start():
+    
+    global model
+    global search
+    global Levenshtein_Limaye
+
+    Levenshtein_Limaye = load_levenshtein.delay()
+    search = load_search.delay()
+    # model = load_model.delay()
+    
+
+    # model = m.get()
+    # search = s.get()
+    # Levenshtein_Limaye = l.get()
+
+    # model = load_model.AsyncResult(app=celery, task_id=m.id).get()
+    # search = load_search.AsyncResult(app=celery, task_id=s.id).get()
+    # Levenshtein_Limaye = load_levenshtein.AsyncResult(app=celery, task_id=l.id).get()
+    
+    # logging.debug(model)
+    # logging.debug(search)
+    # logging.debug(Levenshtein_Limaye)
 
 
 # ----------------------------- RUNNING APPLICATION -------------------------------------------------------------------
