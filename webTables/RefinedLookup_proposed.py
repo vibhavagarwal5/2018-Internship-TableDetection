@@ -13,15 +13,16 @@ import os
 from collections import Counter
 
 #ToDo : put searching for the label in SF in a funciton called search!
-def RefinedLookup(T, Tprime, labelColumn, referenceColumns, search, Levenshtein_Limaye):
+def RefinedLookup(T, Tprime, labelColumn, referenceColumns, info_data):
 	# search = pickle.load(open("/home/yasamin/Codes/WebTableAnnotation/data/surface/Surface_Lower_NoPunc.pickle", "rb"))
+	search = info_data['search']
 
 	Types_Limaye = pickle.load(open("/home/yasamin/Codes/WebTableAnnotation/data/LimayeTypes.pickle", "rb"))
 	# Types_T2D = pickle.load(open("/home/yasamin/Codes/WebTableAnnotation/data/T2DTypes.pickle", "rb"))
 
 	#searchWithNumpy = np.load("/home/yasamin/Codes/WebTableAnnotation/data/surface/searchNumpy.npy").tolist()
 	# Levenshtein_Limaye = pickle.load(open("/home/yasamin/Codes/WebTableAnnotation/data/LimayeLevenshtein.pickle", "rb"))    
-	
+	Levenshtein_Limaye = info_data['Levenshtein_Limaye']
 	# Levenshtein_T2D = pickle.load(open("/home/yasamin/Codes/WebTableAnnotation/data/T2DLevenshtein.pickle", "rb"))    
 
 	#keeps surface form with levenshtein distance

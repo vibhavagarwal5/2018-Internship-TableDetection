@@ -9,7 +9,7 @@ import ReferenceColumn as RC
 import RefinedLookup_proposed as RLU
 import AnnotationPhase as AP
 
-def getFullPhase(T, Table_CSV_Name, search, Levenshtein_Limaye):
+def getFullPhase(T, Table_CSV_Name, info_data):
 
 	#replace html characters reference in tables
 	for col in T:
@@ -66,9 +66,9 @@ def getFullPhase(T, Table_CSV_Name, search, Levenshtein_Limaye):
 	#5.referenceColumns <- getReferenceColumns(T);
 	referenceColumns = RC.getReferenceColumns(T, labelColumn)
 
-	Tprime,TPrimeIsAnnotated,TPrimeAnnotation,acceptableTypes,descriptionToken,relations,SFDistanceDict = RLU.RefinedLookup(T, TPrime, labelColumn, referenceColumns, search,Levenshtein_Limaye)
+	Tprime,TPrimeIsAnnotated,TPrimeAnnotation,acceptableTypes,descriptionToken,relations,SFDistanceDict = RLU.RefinedLookup(T, TPrime, labelColumn, referenceColumns, info_data)
 
-	TprimeIsAnnotated, TPrimeAnnotation = AP.Annotation(T,Tprime,labelColumn,TPrimeIsAnnotated,TPrimeAnnotation,acceptableTypes,descriptionToken,relations,SFDistanceDict, search)
+	TprimeIsAnnotated, TPrimeAnnotation = AP.Annotation(T,Tprime,labelColumn,TPrimeIsAnnotated,TPrimeAnnotation,acceptableTypes,descriptionToken,relations,SFDistanceDict, info_data)
 
 	print("Full phase",TprimeIsAnnotated,TPrimeAnnotation)
 	return(TprimeIsAnnotated, TPrimeAnnotation)

@@ -15,7 +15,7 @@ import numpy as np
 # search = pickle.load(open("/home/yasamin/Codes/WebTableAnnotation/data/surface/Surface_Lower_NoPunc.pickle", "rb"))
 #searchWithNumpy = np.load("/home/yasamin/Codes/WebTableAnnotation/data/surface/searchNumpy.npy").tolist()
 
-def Annotation(T,Tprime,labelColumn,TPrimeIsAnnotated,TPrimeAnnotation,acceptableTypes,descriptionToken,relations,SFDistanceDict, search):
+def Annotation(T,Tprime,labelColumn,TPrimeIsAnnotated,TPrimeAnnotation,acceptableTypes,descriptionToken,relations,SFDistanceDict, info_data):
 
 	#24. for each row i of T do
 	for index, row in T.iterrows():
@@ -28,7 +28,7 @@ def Annotation(T,Tprime,labelColumn,TPrimeIsAnnotated,TPrimeAnnotation,acceptabl
 		label = row[labelColumn]
 
 		#27. results <- search_strict(label, acceptableTypes, descriptionTokens);
-		results = search_strict(label,acceptableTypes, descriptionToken,SFDistanceDict, search)
+		results = search_strict(label,acceptableTypes, descriptionToken,SFDistanceDict, info_data)
 		
 		#TEST : Should i sort here? 
 		results.sort()
@@ -56,7 +56,7 @@ def Annotation(T,Tprime,labelColumn,TPrimeIsAnnotated,TPrimeAnnotation,acceptabl
 			#33. r <- relations[j];
 			r = relations[j] # r is a attr id e.g. : 'P31'
 			#34. results <-  search_loose(label,r,T:i:j);
-			results = search_loose(label,r,row[j],SFDistanceDict, search)
+			results = search_loose(label,r,row[j],SFDistanceDict, info_data)
 			#35. if results.size > 0 then
 			if(len(results) > 0):
 				#36. topResult <- results.get(0);
@@ -75,7 +75,7 @@ def Annotation(T,Tprime,labelColumn,TPrimeIsAnnotated,TPrimeAnnotation,acceptabl
 
 #----------------------------- Functions -------------------------------
 #regarding line 34
-def search_loose(label,r,Tij,SFDistanceDict, search):#e.g. r = 'P36', label=Germany, Tij=Berlin
+def search_loose(label,r,Tij,SFDistanceDict, info_data):#e.g. r = 'P36', label=Germany, Tij=Berlin
 	results = []
 	finalresult = []
 	print("we are in search_loose, label:",label,"r: ",r, "Tij: ",Tij)
@@ -88,6 +88,7 @@ def search_loose(label,r,Tij,SFDistanceDict, search):#e.g. r = 'P36', label=Germ
 	label = re.sub("\s\s+" , " ", label)
 	label = label.split(" (")[0]
 
+	search = info_data['search']
 	try:
 		results = search[label]
 	except KeyError:
@@ -108,7 +109,7 @@ def search_loose(label,r,Tij,SFDistanceDict, search):#e.g. r = 'P36', label=Germ
 #ye contain facte jadid doros kon age tu attribute 'P36', yechi tu mayehaye(lev. distance) Tij(berlin) peida kardi, un resulte
 
 #regarding line 27
-def search_strict(label,acceptableTypes,descriptionTokens,SFDistanceDict, search):
+def search_strict(label,acceptableTypes,descriptionTokens,SFDistanceDict, info_data):
 	print("we are in search_strict")
 	results = []
 	keyAllTypes = []
@@ -124,6 +125,7 @@ def search_strict(label,acceptableTypes,descriptionTokens,SFDistanceDict, search
 	except TypeError:
 		print("cant remove spaces- annotation phase")
 	
+	search = info_data['search']
 	try:
 		results = search[label]
 	except KeyError:

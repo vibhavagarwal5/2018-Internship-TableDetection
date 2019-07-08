@@ -12,14 +12,14 @@ import copy
 from collections import Counter
 import time
 
-def getEmbedding(T, model, search, Levenshtein_Limaye):
+def getEmbedding(T, info_data):
 
     starttime = time.time()
 
     #----------------------Loading embedding model ------------------------
     #model min_count = 1
     # model = LM.Model.load(models_directory="/home/yasamin/Codes/WebTableAnnotation/data/models/Model_Creation", filename="3-wikidata-20190229-truthy-BETA-cbow-size=100-window=1-min_count=1")
-
+    model = info_data['model']
     print('Time1: ' + format(time.time() - starttime))
                        
 
@@ -33,8 +33,10 @@ def getEmbedding(T, model, search, Levenshtein_Limaye):
 
     #----------------------Loading pickle surface form ------------------------
     # search = pickle.load(open("/home/yasamin/Codes/WebTableAnnotation/data/surface/Surface_Lower_NoPunc.pickle", "rb"))
+    search = info_data['search']
 
     # Levenshtein_Limaye = pickle.load(open("/home/yasamin/Codes/WebTableAnnotation/data/LimayeLevenshtein_allcols.pickle", "rb"))    
+    Levenshtein_Limaye = info_data['Levenshtein_Limaye']
     
     # Levenshtein_T2D = pickle.load(open("/home/yasamin/Codes/WebTableAnnotation/data/T2DLevenshtein_allcols.pickle", "rb"))    
 

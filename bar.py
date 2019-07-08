@@ -9,6 +9,7 @@ from wtforms import Form, StringField, IntegerField, PasswordField, validators
 from passlib.hash import sha256_crypt
 import time
 from threading import Lock
+import threading
 from flask import Flask, render_template, session, request
 from flask_socketio import SocketIO, emit
 from celery import Celery, chord
@@ -25,6 +26,7 @@ import numpy as np
 import webTables.loadmodel as LM
 import webTables.Multiprocessing as MP
 import pickle
+from multiprocessing.pool import ThreadPool
 
 # ----------------------------- CONSTANTS -----------------------------------------------------------------------------
 
@@ -67,9 +69,14 @@ switcher = {
     'wget.log': WGET_LOG_PATH,
 }
 
+global model
+global search
+global Levenshtein_Limaye
+global pool
 model = None
 search = None
 Levenshtein_Limaye = None
+pool = None
 
 # ----------------------------- APP CONFIG ----------------------------------------------------------------------------
 
@@ -85,6 +92,8 @@ app.secret_key = 'Aj"$7PE#>3AC6W]`STXYLz*[G\gQWA'
 # Celery configuration
 app.config['CELERY_BROKER_URL'] = 'redis://localhost:6379/0'
 app.config['CELERY_RESULT_BACKEND'] = 'redis://localhost:6379/0'
+app.config['CELERY_RESULT_SERIALIZER'] = 'pickle'
+app.config['CELERY_ACCEPT_CONTENT'] = ['json', 'pickle']
 
 # SocketIO
 socketio = SocketIO(app, async_mode=async_mode)
@@ -110,7 +119,7 @@ mysql = MySQL(app)
 
 # ----------------------------- LOGGING  --------------------------------------------------------------------------
 
-logging.basicConfig(filename='/home/vibhav/bar/log/foo.log',level=logging.DEBUG)
+logging.basicConfig(filename='/home/vibhav/bar/log/out.log',level=logging.DEBUG)
 logger = get_task_logger(__name__)
 
 
@@ -119,10 +128,11 @@ logger = get_task_logger(__name__)
 # Background task in charge of crawling
 # time_limit=MAX_CRAWLING_DURATION other possibility
 
-@celery.task(bind=True)
+@celery.task(bind=True, serializer='json')
 def crawling_task(self, url='', post_url='', domain='',
                   max_crawl_duration=MAX_CRAWLING_DURATION, max_crawl_size=MAX_CRAWL_SIZE,
                   max_crawl_depth=MAX_CRAWL_DEPTH):
+
 
     # STEP 1: Start the wget subprocess
     command = shlex.split("timeout %d wget -r -l %d -A pdf %s" %
@@ -187,7 +197,7 @@ def crawling_task(self, url='', post_url='', domain='',
 
 
 # Background task in charge of performing table detection on a single pdf
-@celery.task(bind=True)
+@celery.task(bind=True, serializer='json')
 def tabula_task(self, file_path='', post_url='', domain=''):
     
     # STEP 0: check if file is already in db
@@ -357,7 +367,7 @@ def tabula_task(self, file_path='', post_url='', domain=''):
 
 
 # Background task serving as callback to save metadata to db
-@celery.task(bind=True)
+@celery.task(bind=True, serializer='json')
 def pdf_stats(self, tabula_list, domain='', url='', crawl_total_time=0, post_url='', processing_start_time=0):
 
     with app.app_context():
@@ -1138,22 +1148,91 @@ def cid_entity_detection(cid):
 
     # Close connection
     cur.close()
-    # logging.debug(crawl)
 
-    # info_data = {
-    #     'domain': crawl['domain'],
-    #     'model': load_model.AsyncResult(app=celery, task_id=model.id).get(),
-    #     'search': load_search.AsyncResult(app=celery, task_id=search.id).get(),
-    #     'Levenshtein_Limaye': load_levenshtein.AsyncResult(app=celery, task_id=Levenshtein_Limaye.id).get()
-    # }
+    # if (Levenshtein_Limaye.ready()):
+    # logging.debug(str(Levenshtein_Limaye.ready()) +" "+ str(model.ready()))
+    # if (Levenshtein_Limaye.ready()):
+    if (Levenshtein_Limaye.ready() and model.ready() and search.ready()):
+    # if(
+    #     load_model.AsyncResult(app=celery, task_id=model.id).ready() and 
+    #     load_search.AsyncResult(app=celery, task_id=search.id).ready() and load_levenshtein.AsyncResult(app=celery, task_id=Levenshtein_Limaye.id).ready()
+    #     ):
+        info_data = {
+            'domain': crawl['domain'],
+            'Levenshtein_Limaye': Levenshtein_Limaye.get(),
+            'model': model.get(),
+            'search': search.get()
+        }
+        # info_data = {
+        #     'domain': crawl['domain'],
+        #     'model': load_model.AsyncResult(app=celery, task_id=model.id).get(),
+        #     'search': load_search.AsyncResult(app=celery, task_id=search.id).get(),
+        #     'Levenshtein_Limaye': load_levenshtein.AsyncResult(app=celery, task_id=Levenshtein_Limaye.id).get()
+        # }
 
-    MP.run_detection(
-        crawl['domain'],
-        load_model.AsyncResult(app=celery, task_id=model.id).get(),
-        load_search.AsyncResult(app=celery, task_id=search.id).get(),
-        load_levenshtein.AsyncResult(app=celery, task_id=Levenshtein_Limaye.id).get())
+        entity_result = pool.apply_async(MP.run_detection, (info_data,))
+        # entity_result = entity_detection_task.delay(
+        #     crawl = crawl,
+        #     Levenshtein_Limaye=Levenshtein_Limaye.get(),
+        #     model = model.get(),
+        #     search = search.get())
+
+        logging.debug("entity_result"+str(entity_result))
+        # logging.debug('entity_result output:\n')
+        # logging.debug(entity_result.get())
+        # logging.debug(entity_detection_task.AsyncResult(app=celery, task_id=entity_result.id).get())
+    else:
+        logging.debug('still working')
 
     return redirect(url_for('index'))
+
+# @celery.task(bind=True, serializer='pickle')
+# def entity_detection_task(self,crawl,Levenshtein_Limaye,model, search):
+    
+#     logging.debug('Inside task: '+ str(Levenshtein_Limaye))
+#     info_data = {
+#         'domain': crawl['domain'],
+#         'Levenshtein_Limaye': Levenshtein_Limaye,
+#         'model': model.get(),
+#         'search': search.get()
+#     }
+
+#     return MP.run_detection(info_data)
+
+# ----------------------------- LOADING PICKLES -------------------------------------------------------------------
+
+# @celery.task(bind=True)
+def load_model():
+    logging.debug('In model')
+    # return LM.Model.load(models_directory="/home/vibhav/bar",filename="Word2Vec_100dim_science")
+    return LM.Model.load(models_directory="/home/yasamin/Codes/WebTableAnnotation/data/models/Model_Creation",filename="3-wikidata-20190229-truthy-BETA-cbow-size=100-window=1-min_count=1")
+
+# @celery.task(bind=True)
+def load_search():
+    logging.debug('In search')
+    return pickle.load(open("/home/yasamin/Codes/WebTableAnnotation/data/surface/Surface_Lower_NoPunc.pickle", "rb"))
+
+# @celery.task(bind=True)
+def load_levenshtein():
+    logging.debug('In leve')
+    return pickle.load(open("/home/yasamin/Codes/WebTableAnnotation/data/LimayeLevenshtein_allcols.pickle", "rb"))
+
+@app.before_first_request
+def load_pickle_startup():
+    global model
+    global search
+    global Levenshtein_Limaye
+    global pool
+    pool = ThreadPool(processes=4)
+    Levenshtein_Limaye = pool.apply_async(load_levenshtein) 
+    search = pool.apply_async(load_search) 
+    model = pool.apply_async(load_model) 
+
+    # Levenshtein_Limaye = load_levenshtein.delay()
+    # search = load_search.delay()
+    # model = load_model.delay()
+
+
 
 # ----------------------------- ASYNCHRONOUS COMMUNICATION ------------------------------------------------------------
 # Note: these are not crucial at the moment,
@@ -1170,53 +1249,14 @@ def test_disconnect():
     print('Client disconnected', request.sid)
 
 
-
-# ----------------------------- LOADING PICKLES -------------------------------------------------------------------
-
-@celery.task(bind=True)
-def load_model(self):
-    # time.sleep(10)
-    # return "ola amigo m"
-    return LM.Model.load(models_directory="/home/yasamin/Codes/WebTableAnnotation/data/models/Model_Creation",filename="3-wikidata-20190229-truthy-BETA-cbow-size=100-window=1-min_count=1")
-
-@celery.task(bind=True)
-def load_search(self):
-    # time.sleep(20)
-    # return "ola amigo s"
-    return pickle.load(open("/home/yasamin/Codes/WebTableAnnotation/data/surface/Surface_Lower_NoPunc.pickle", "rb"))
-
-@celery.task(bind=True)
-def load_levenshtein(self):
-    # time.sleep(30)
-    # return "ola amigo l"
-    return pickle.load(open("/home/yasamin/Codes/WebTableAnnotation/data/LimayeLevenshtein_allcols.pickle", "rb"))
-
-@app.before_first_request
-def _run_on_start():
-    
-    global model
-    global search
-    global Levenshtein_Limaye
-
-    Levenshtein_Limaye = load_levenshtein.delay()
-    search = load_search.delay()
-    # model = load_model.delay()
-    
-
-    # model = m.get()
-    # search = s.get()
-    # Levenshtein_Limaye = l.get()
-
-    # model = load_model.AsyncResult(app=celery, task_id=m.id).get()
-    # search = load_search.AsyncResult(app=celery, task_id=s.id).get()
-    # Levenshtein_Limaye = load_levenshtein.AsyncResult(app=celery, task_id=l.id).get()
-    
-    # logging.debug(model)
-    # logging.debug(search)
-    # logging.debug(Levenshtein_Limaye)
-
-
 # ----------------------------- RUNNING APPLICATION -------------------------------------------------------------------
 
 if __name__ == '__main__':
     socketio.run(app)
+    # pool = ThreadPool(processes=4)
+    # Levenshtein_Limaye = pool.apply_async(load_levenshtein) 
+    # # search = pool.apply_async(load_search) 
+    # model = pool.apply_async(load_model) 
+    # print('INNNNNNNN')
+    # logging.debug('INNNNNNNN')
+    # pool.apply_async(socketio.run(app))
